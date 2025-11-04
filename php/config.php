@@ -10,7 +10,8 @@ function build_predict_cmd($image) {
         // Fallbacks
         $ewoa_model = file_exists("$workdir/models/model_ewoa.json") ? "$workdir/models/model_ewoa.json" : "$workdir/models/model.json";
     }
-    return "PYTHONPATH=$workdir $python -m woa_tool.cli predict --model $ewoa_model --image $image";
+    // Force UTF-8 and set PYTHONPATH before launching Python (Windows CMD style)
+    return "chcp 65001 >NUL & set PYTHONIOENCODING=utf-8 & set \"PYTHONPATH=$workdir\" & $python -m woa_tool.cli predict --model $ewoa_model --image $image";
 }
 }
 
@@ -37,6 +38,6 @@ return [
     "defaults" => $defaults,
     "models" => $models,
     // Set this to your ground-truth CSV file for comparison page
-    // Example: C:\\xampp\\htdocs\\CUR_TOOL\\WOA-TOOL\\data\\ground_truth.csv
-    "csv_path" => $workdir . '/data/ground_truth.csv'
+    // Updated to existing CSV: C:\\xampp\\htdocs\\CUR_TOOL\\WOA-TOOL\\data\\test.csv
+    "csv_path" => $workdir . '/data/test.csv'
 ];
