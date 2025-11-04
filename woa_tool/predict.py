@@ -1,6 +1,6 @@
 # woa_tool/predict.py
 
-import os, json
+import os, sys, json
 import numpy as np
 from typing import Dict, List, Tuple
 
@@ -16,8 +16,9 @@ def _load_model(model_path: str):
     selected_idx: List[int] = cfg.get("selected_idx", list(range(len(feature_names))))
 
     # training normalization stats (used for test-time standardization)
-    train_mu = np.array(cfg["train_mu"], dtype=float)
-    train_sigma = np.array(cfg["train_sigma"], dtype=float)
+    # Fallback for models that use 'global_mu'/'global_sigma'
+    train_mu = np.array(cfg.get("train_mu", cfg.get("global_mu")), dtype=float)
+    train_sigma = np.array(cfg.get("train_sigma", cfg.get("global_sigma")), dtype=float)
 
     # class stats live in the standardized feature space
     mu_B = np.array(cfg["class_stats"]["0"]["mu"], dtype=float)
@@ -27,7 +28,7 @@ def _load_model(model_path: str):
     Sp_inv = np.array(cfg["Sp_inv"], dtype=float)
 
     # operating threshold
-    tau = float(cfg["tau"])
+    tau = float(cfg.get("tau", cfg.get("tau_train", 1.0)))
 
     class_labels = {int(k): v for k, v in cfg["class_labels"].items()}
 
@@ -125,15 +126,46 @@ def predict(model_path: str, image_path: str, tau_override: float | None = None)
     selected_idx: List[int] = cfg.get("selected_idx", list(range(len(feature_names))))
     selected_names = [feature_names[i] for i in selected_idx]
 
-    train_mu = np.array(cfg["train_mu"], dtype=float)
-    train_sigma = np.array(cfg["train_sigma"], dtype=float)
-    mu_B = np.array(cfg["class_stats"]["0"]["mu"], dtype=float)
-    mu_M = np.array(cfg["class_stats"]["1"]["mu"], dtype=float)
-    Sp_inv = np.array(cfg["Sp_inv"], dtype=float)
-    tau = float(cfg["tau"])
+    # --- BEGIN robust model parsing (drop-in) ---
+    # Fallback for train/global stats
+    train_mu  = np.array(cfg.get("train_mu", cfg.get("global_mu")), dtype=float) if cfg.get("train_mu", cfg.get("global_mu")) is not None else None
+    train_sig = np.array(cfg.get("train_sigma", cfg.get("global_sigma")), dtype=float) if cfg.get("train_sigma", cfg.get("global_sigma")) is not None else None
+    if train_mu is None or train_sig is None:
+        sys.stderr.write("[warn] train/global mean/std missing; continuing.\n")
+    # keep existing variable name for downstream code
+    train_sigma = train_sig if train_sig is not None else np.ones(len(feature_names), dtype=float)
+
+    # Class stats can be keyed by "0"/"1" or 0/1
+    cs = cfg.get("class_stats", {})
+    cs0_key = "0" if "0" in cs else (0 if 0 in cs else None)
+    cs1_key = "1" if "1" in cs else (1 if 1 in cs else None)
+    if cs0_key is None or cs1_key is None:
+        raise KeyError("class_stats must contain keys for classes 0 and 1")
+
+    mu_B = np.array(cs[cs0_key]["mu"], dtype=float)
+    mu_M = np.array(cs[cs1_key]["mu"], dtype=float)
+
+    # Tau: prefer explicit 'tau', else 'tau_train', else neutral 1.0
+    tau = float(cfg.get("tau", cfg.get("tau_train", 1.0)))
+
+    # Sp_inv: use if present; else build diagonal pooled covariance from per-class sigmas
+    if "Sp_inv" in cfg:
+        Sp_inv = np.array(cfg["Sp_inv"], dtype=float)
+    else:
+        sys.stderr.write("[info] 'Sp_inv' not found; constructing from per-class sigma.\n")
+        sig_B = np.array(cs[cs0_key].get("sigma"), dtype=float) if "sigma" in cs[cs0_key] else None
+        sig_M = np.array(cs[cs1_key].get("sigma"), dtype=float) if "sigma" in cs[cs1_key] else None
+        if sig_B is None or sig_M is None:
+            d = len(mu_B)
+            sys.stderr.write("[warn] class sigmas missing; using identity-diagonal pooled covariance.\n")
+            Sp = np.eye(d, dtype=float)
+        else:
+            Sp = np.diag((sig_B**2 + sig_M**2) / 2.0)
+        Sp_inv = np.linalg.pinv(Sp)
+    # --- END robust model parsing ---
 
     if tau_override is not None:
-        print(f"⚙️  τ override active → using τ = {tau_override}")
+        print(f"[info] tau override active -> using tau = {tau_override}", file=sys.stderr)
         tau = float(tau_override)
 
     # === Validate image path ===
